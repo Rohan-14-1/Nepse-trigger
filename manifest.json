@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "NEPSE Order Trigger",
+  "version": "0.1.0",
+  "description": "A fast manual-trigger order helper that runs inside your own logged-in NEPSE TMS tab.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["https://tms35.nepsetms.com.np/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "NEPSE Order Trigger"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://tms35.nepsetms.com.np/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
