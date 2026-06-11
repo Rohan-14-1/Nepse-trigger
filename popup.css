@@ -1,0 +1,171 @@
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #262d36;
+  --ink: #e6edf3;
+  --muted: #7d8694;
+  --go: #3fb950;
+  --go-soft: rgba(63, 185, 80, 0.18);
+  --amber: #d29922;
+  --danger: #f85149;
+
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  width: 360px;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono { font-family: var(--mono); }
+
+.panel { padding: 14px; }
+
+/* header */
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand-mark {
+  width: 10px; height: 10px;
+  border: 2px solid var(--go);
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+.brand-name {
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  font-weight: 600;
+  color: var(--muted);
+}
+.dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 0 transparent;
+}
+.dot[data-state="armed"] {
+  background: var(--go);
+  animation: pulse 1.4s ease-out infinite;
+}
+.dot[data-state="error"] { background: var(--danger); }
+.dot[data-state="placed"] { background: var(--go); }
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 var(--go-soft); }
+  70%  { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* inputs */
+.target { display: grid; gap: 10px; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.field { display: grid; gap: 5px; min-width: 0; }
+.label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.input {
+  width: 100%;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  font-size: 15px;
+  padding: 9px 10px;
+  outline: none;
+  transition: border-color 0.12s ease;
+}
+.input::placeholder { color: #4a525d; }
+.input:focus { border-color: var(--go); }
+.input[type="number"]::-webkit-inner-spin-button { opacity: 0.4; }
+
+/* arm button — the one bold element */
+.arm {
+  margin: 14px 0;
+  width: 100%;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 15px;
+  letter-spacing: 0.22em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+.arm:hover { border-color: var(--muted); }
+.arm.is-armed {
+  background: var(--go-soft);
+  border-color: var(--go);
+  color: var(--go);
+  box-shadow: 0 0 18px -6px var(--go);
+}
+
+/* readout terminal */
+.readout {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0b0e13;
+  overflow: hidden;
+}
+.readout-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.status { font-size: 11px; color: var(--ink); }
+.clear {
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 11px; font-family: var(--mono);
+}
+.clear:hover { color: var(--ink); }
+.log {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  height: 124px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.log li { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.log li .ts { color: #4a525d; margin-right: 6px; }
+.log li.go { color: var(--go); }
+.log li.warn { color: var(--amber); }
+.log li.error { color: var(--danger); }
+
+/* banner + footer */
+.banner {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 11px;
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--danger);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+}
+.foot {
+  margin: 12px 0 0;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+}
