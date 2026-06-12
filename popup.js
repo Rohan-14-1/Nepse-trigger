@@ -1,11 +1,13 @@
-// popup.js — the control panel. It sends ARM/DISARM commands to the content
-// script in your active tab and shows the live status/log it writes back.
+// popup.js — the control panel. Two actions:
+//   ARM             → place an order, then chase the price up until filled
+//   MODIFY EXISTING → don't place; just scan the Order Book and chase an
+//                     order that's already there (placed by you)
+// Commands go to the content script in your TMS tab; status/log come back via storage.
 
 const $ = (id) => document.getElementById(id);
-let armed = false;
+let armedMode = null; // null | 'place' | 'modify'
 
-// Find the TMS tab by URL so commands always reach it, even if the popup's
-// "current window" is something else. Falls back to the active tab.
+// Find the TMS tab by URL so commands always reach it. Falls back to active tab.
 async function activeTab() {
   try {
     const matches = await chrome.tabs.query({ url: 'https://tms35.nepsetms.com.np/*' });
@@ -22,51 +24,59 @@ async function send(type, payload) {
     hideBanner();
     return true;
   } catch (e) {
-    showBanner('Open your broker TMS tab first, then reopen this.');
+    showBanner('Reload the TMS page (the extension was updated), then try again.');
     return false;
   }
 }
 
-function showBanner(text) {
-  const b = $('banner');
-  b.textContent = text;
-  b.hidden = false;
-}
+function showBanner(text) { const b = $('banner'); b.textContent = text; b.hidden = false; }
 function hideBanner() { $('banner').hidden = true; }
 
-async function arm() {
+async function start(mode) {
   const symbol = $('symbol').value.trim().toUpperCase();
-  const quantity = parseInt($('quantity').value, 10);
+  const quantity = parseInt($('quantity').value, 10) || 0;
   const maxPrice = parseFloat($('maxPrice').value) || 0; // 0 = auto (page max)
 
-  if (!symbol || !quantity) {
-    showBanner('Fill in symbol and quantity. Max price is optional.');
-    return;
+  if (mode === 'place') {
+    if (!symbol) return showBanner('Enter a symbol.');
+    if (!quantity) return showBanner('Enter a quantity.');
   }
-  const ok = await send('ARM', { symbol, quantity, maxPrice });
-  if (ok) { armed = true; render(); }
+  // 'modify' mode: symbol optional (blank = first open order in the book)
+
+  const chaseOnly = mode === 'modify';
+  const ok = await send('ARM', { symbol, quantity, maxPrice, chaseOnly });
+  if (ok) { armedMode = mode; render(); }
 }
 
-async function disarm() {
+async function stop() {
   await send('DISARM');
-  armed = false;
+  armedMode = null;
   render();
 }
 
 function render() {
-  const btn = $('armBtn');
-  btn.classList.toggle('is-armed', armed);
-  btn.textContent = armed ? 'DISARM' : 'ARM';
-  ['symbol', 'quantity', 'maxPrice'].forEach((id) => { $(id).disabled = armed; });
+  const armBtn = $('armBtn');
+  const modBtn = $('modifyBtn');
+
+  armBtn.classList.toggle('is-armed', armedMode === 'place');
+  modBtn.classList.toggle('is-armed', armedMode === 'modify');
+
+  armBtn.textContent = armedMode === 'place' ? 'DISARM' : 'ARM';
+  modBtn.textContent = armedMode === 'modify' ? 'STOP' : 'MODIFY EXISTING';
+
+  // while one action runs, disable the other and lock the inputs
+  armBtn.disabled = armedMode === 'modify';
+  modBtn.disabled = armedMode === 'place';
+  ['symbol', 'quantity', 'maxPrice'].forEach((id) => { $(id).disabled = !!armedMode; });
 }
 
 function paint({ log, status }) {
   $('status').textContent = status || 'idle';
 
   const dot = $('dot');
-  if (armed) dot.dataset.state = 'armed';
+  if (armedMode) dot.dataset.state = 'armed';
   else if (/error/i.test(status)) dot.dataset.state = 'error';
-  else if (/placed/i.test(status)) dot.dataset.state = 'placed';
+  else if (/placed|modified|completed/i.test(status)) dot.dataset.state = 'placed';
   else dot.dataset.state = 'idle';
 
   const list = $('logList');
@@ -84,18 +94,19 @@ function poll() {
   chrome.storage.local.get({ log: [], status: 'idle' }, paint);
 }
 
-$('armBtn').addEventListener('click', () => (armed ? disarm() : arm()));
+$('armBtn').addEventListener('click', () => (armedMode === 'place' ? stop() : start('place')));
+$('modifyBtn').addEventListener('click', () => (armedMode === 'modify' ? stop() : start('modify')));
 $('clearBtn').addEventListener('click', () => chrome.storage.local.set({ log: [] }));
 
 setInterval(poll, 500);
 poll();
 
-// Sync the armed state from the content script when the popup opens.
+// Restore button state when the popup opens.
 (async () => {
   const tab = await activeTab();
   try {
     const r = await chrome.tabs.sendMessage(tab.id, { type: 'PING' });
-    armed = !!(r && r.armed);
-  } catch (e) { /* content script not present on this tab */ }
+    if (r && r.armed) armedMode = r.chaseOnly ? 'modify' : 'place';
+  } catch (e) { /* content script not on this tab */ }
   render();
 })();
