@@ -95,8 +95,20 @@ body {
 .input[type="number"]::-webkit-inner-spin-button { opacity: 0.4; }
 
 /* arm button — the one bold element */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.check input { accent-color: var(--go); width: 14px; height: 14px; cursor: pointer; }
+
 .arm {
-  margin: 14px 0;
+  margin: 14px 0 8px;
   width: 100%;
   padding: 13px;
   border: 1px solid var(--line);
@@ -111,11 +123,26 @@ body {
   transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
 }
 .arm:hover { border-color: var(--muted); }
+.arm:disabled { opacity: 0.4; cursor: not-allowed; }
 .arm.is-armed {
   background: var(--go-soft);
   border-color: var(--go);
   color: var(--go);
   box-shadow: 0 0 18px -6px var(--go);
+}
+.arm.secondary {
+  margin: 0 0 14px;
+  background: transparent;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+.arm.secondary:hover { color: var(--ink); border-color: var(--muted); }
+.arm.secondary.is-armed {
+  background: rgba(210, 153, 34, 0.14);
+  border-color: var(--amber);
+  color: var(--amber);
+  box-shadow: 0 0 18px -6px var(--amber);
 }
 
 /* readout terminal */
