@@ -86,7 +86,16 @@ function headerMap(table) {
   });
   return m;
 }
-const bodyRows = (table) => [...table.querySelectorAll('tbody tr')].filter((r) => r.querySelectorAll('td').length > 1);
+// FIX: Angular SPA tables often render <tr> directly under <table> with no <tbody>.
+// querySelectorAll('tbody tr') returns 0 rows in that case, so we fall back to
+// all <tr> elements that contain <td> cells (header rows only have <th>).
+const bodyRows = (table) => {
+  let rows = [...table.querySelectorAll('tbody tr')];
+  if (!rows.length) {
+    rows = [...table.querySelectorAll('tr')].filter((r) => r.querySelectorAll('td').length > 0);
+  }
+  return rows.filter((r) => r.querySelectorAll('td').length > 1);
+};
 const cellText = (row, idx) => { const td = row.querySelectorAll('td')[idx]; return td ? textOf(td) : ''; };
 function rowOpen(row, m) {
   const s = (cellText(row, m.status) || '').toLowerCase();
@@ -119,9 +128,10 @@ function diagnoseOrderBook() {
   return tables.map((t, i) => {
     const h = [...t.querySelectorAll('th')].map(textOf);
     const rows = bodyRows(t);
+    const tbodyOnly = [...t.querySelectorAll('tbody tr')].filter((r) => r.querySelectorAll('td').length > 1).length;
     let row0 = '';
     if (rows.length) row0 = ' row0=[' + [...rows[0].querySelectorAll('td')].map(textOf).join('|') + ']';
-    return `#${i} h=[${h.join(',')}] rows=${rows.length}${row0}`;
+    return `#${i} h=[${h.join(',')}] rows=${rows.length}(tbody=${tbodyOnly})${row0}`;
   }).join(' || ');
 }
 function readOrder(o) {
@@ -131,27 +141,62 @@ function readOrder(o) {
 // ---------- MODIFY: click the row's edit icon, set price in the dialog, save ----------
 function findEditControl(cell) {
   const clicks = [...cell.querySelectorAll('button,a,i,span,svg,img,[role="button"]')];
-  let e = clicks.find((c) => /edit|modif|pencil/.test(attrText(c)));
+  // 1) Attributes (class / title / aria-label) contain an edit-like word
+  let e = clicks.find((c) => /edit|modif|pencil|pen/.test(attrText(c)));
   if (e) return e;
-  e = clicks.find((c) => !/cancel|delet|reject|trash|close|ban/.test(attrText(c)));
+  // 2) Text content is an icon name (Material Icons: <span class="material-icons">edit</span>)
+  e = clicks.find((c) => /^(edit|create|mode_edit|pencil|modify)$/.test((c.textContent || '').trim().toLowerCase()));
+  if (e) return e;
+  // 3) Fallback: first clickable that is NOT a cancel / delete icon
+  e = clicks.find((c) => {
+    const combined = attrText(c) + ' ' + (c.textContent || '').toLowerCase();
+    return !/cancel|delet|reject|trash|close|ban|remove|block/.test(combined);
+  });
   return e || clicks[0];
 }
+// True once the page shows the "Modifying Order # N" badge (i.e. the BUY
+// button is now acting as Save-modify, not Place-new-order).
+function inModifyMode() {
+  // Most reliable: the page's own modify-strip element, shown via a "show" class.
+  const strip = document.getElementById('mod-strip');
+  if (strip && strip.classList && strip.classList.contains('show')) return true;
+  // Fallback: scan visible text content (not just leaf elements, since the
+  // badge text may be split across child spans) for "Modifying Order".
+  return [...document.querySelectorAll('div,span,p,b,strong,button')]
+    .some((el) => visible(el) && /modifying order/i.test(el.textContent || ''));
+}
+
 async function modifyOrderRow(o, newPrice) {
   const cell = o.row.querySelectorAll('td')[o.m.action];
   if (!cell) throw new Error('action cell not found');
   const edit = findEditControl(cell);
-  if (!edit) throw new Error('Modify icon not found');
-  clickEl(edit);                 // clicking the pencil loads the order into the form
-  await sleep(450);
+  if (!edit) throw new Error('Modify icon not found in action cell');
+  clickEl(edit);  // clicking the pencil loads the order into the form
 
-  const pr = inputForLabel('PRICE');
-  if (!pr) throw new Error('price box not found after Modify');
+  // Wait up to ~1.5 s for the page to enter "Modifying Order # N" mode AND
+  // for the price field to appear and be populated (SPA re-render).
+  let pr = null;
+  for (let i = 0; i < 10; i++) {
+    await sleep(150);
+    pr = inputForLabel('PRICE');
+    if (inModifyMode() && pr && num(pr.value) != null && num(pr.value) > 0) break;
+  }
+  if (!inModifyMode()) throw new Error('did not enter Modifying-Order mode — edit icon may be wrong');
+  if (!pr) throw new Error('price box not found after clicking Edit');
+
   setNativeValue(pr, String(newPrice));
   await sleep(150);
-  if (!num(pr.value) || num(pr.value) <= 0) throw new Error('modify price did not stick');
+  if (!num(pr.value) || num(pr.value) <= 0) throw new Error('modify price did not stick: ' + pr.value);
 
-  const submit = findBuyButton() || findSubmitButton('update|modif|save|submit|confirm');
-  if (!submit) throw new Error('update button not found');
+  // Re-check we're still in modify mode right before submitting (guards against
+  // the form resetting back to "new order" between the checks above and now).
+  if (!inModifyMode()) throw new Error('left Modifying-Order mode before submit — aborting to avoid a new order');
+
+  // In modify mode the BUY button itself acts as Save; prefer an explicit
+  // update/save/modify button if the page has one, else fall back to BUY —
+  // but ONLY because we've verified inModifyMode() above.
+  const submit = findSubmitButton('update|modif|save|confirm') || findBuyButton();
+  if (!submit) throw new Error('update/save button not found');
   clickEl(submit);
 }
 
@@ -207,7 +252,13 @@ function fireMouse(el, type) {
 }
 function clickEl(el) {
   if (!el) return;
-  fireMouse(el, 'mousedown'); fireMouse(el, 'mouseup'); fireMouse(el, 'click');
+  // Only mousedown/mouseup here — do NOT also dispatch a synthetic 'click'
+  // MouseEvent. el.click() below already dispatches one real 'click' event,
+  // which is what triggers onclick="..." handlers. Dispatching both would
+  // call onclick handlers TWICE per "click" (e.g. submitOrder() running
+  // twice — once to save a modify, once more as a brand-new order with the
+  // still-populated form fields).
+  fireMouse(el, 'mousedown'); fireMouse(el, 'mouseup');
   try { el.click(); } catch (e) {}
 }
 // The SELL/BUY toggle sits visually between the SELL and BUY labels. Find it by
@@ -279,7 +330,8 @@ async function placeOrder(symbol, quantity, capPrice) {
 function selfTest() {
   const high = readTargetPrice();
   const table = findOrderTable();
-  log(`detect: HIGH=${high == null ? '?' : high}, order table=${table ? 'yes' : 'no'}`,
+  const rows = table ? bodyRows(table).length : 0;
+  log(`detect: HIGH=${high == null ? '?' : high}, order table=${table ? 'yes' : 'no'}, rows=${rows}`,
       (high != null && table) ? 'go' : 'warn');
 }
 
@@ -319,6 +371,7 @@ async function tick() {
       if (!STATE.diagnosed) { STATE.diagnosed = true; log('diag: ' + diagnoseOrderBook(), 'warn'); }
       return;
     }
+    STATE.diagnosed = false; // reset so a future loss of the row logs diagnostics again
     const { price, status } = readOrder(o);
     if (STATE.orderPrice === 0 && price != null) { STATE.orderPrice = price; log(`tracking order @ ${price}`, 'go'); }
     if (status.includes('complet') || status.includes('fill')) {
