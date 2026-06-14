@@ -352,6 +352,17 @@ async function tick() {
         STATE.orderPrice = price; STATE.placeFails = 0;
         log(`ORDER PLACED ${STATE.symbol} x${STATE.quantity} @ ${price}`, 'go');
         setStatus(`placed @ ${price} — chasing`);
+        // Remember that the order is already in the book, so if the page
+        // reloads, resume in chase-only mode instead of placing another one.
+        if (alive()) {
+          try {
+            chrome.storage.local.get({ armedState: null }, (d) => {
+              if (d.armedState) {
+                chrome.storage.local.set({ armedState: { ...d.armedState, chaseOnly: true, hasPlacedOrder: true } });
+              }
+            });
+          } catch (e) {}
+        }
       } catch (e) {
         STATE.placed = false;
         STATE.placeFails = (STATE.placeFails || 0) + 1;
@@ -399,7 +410,7 @@ async function tick() {
   } finally { STATE.busy = false; }
 }
 
-function arm(p) {
+function arm(p, resumed) {
   STATE.symbol = (p.symbol || '').toUpperCase();
   STATE.quantity = p.quantity || 0;
   STATE.capPrice = p.maxPrice || 0;
@@ -408,7 +419,19 @@ function arm(p) {
   STATE.orderPrice = 0; STATE.lastModify = 0; STATE.busy = false; STATE.placeFails = 0; STATE.diagnosed = false; STATE.armed = true;
   const mode = STATE.chaseOnly ? 'CHASE-ONLY' : 'PLACE+CHASE';
   const capTxt = STATE.capPrice > 0 ? `cap ${STATE.capPrice}` : 'no cap';
-  log(`ARMED [${mode}] ${STATE.symbol || '(any)'} ${STATE.chaseOnly ? '' : 'x' + STATE.quantity + ', '}${capTxt}`, 'go');
+  log(`${resumed ? 'RE-ARMED after reload' : 'ARMED'} [${mode}] ${STATE.symbol || '(any)'} ${STATE.chaseOnly ? '' : 'x' + STATE.quantity + ', '}${capTxt}`, 'go');
+  // Persist so a page reload (e.g. the TMS reloading itself after an action)
+  // can automatically resume the chase instead of silently going idle.
+  if (alive()) {
+    try {
+      chrome.storage.local.set({
+        armedState: {
+          symbol: p.symbol || '', quantity: p.quantity || 0,
+          maxPrice: p.maxPrice || 0, chaseOnly: !!p.chaseOnly,
+        },
+      });
+    } catch (e) {}
+  }
   selfTest();
   setStatus(STATE.chaseOnly ? 'armed — finding your order' : 'armed — placing');
   if (STATE.timer) clearInterval(STATE.timer);
@@ -420,6 +443,7 @@ function disarm() {
   if (STATE.timer) clearInterval(STATE.timer);
   STATE.timer = null;
   window.__NEPSE_TRIGGER_TIMER__ = null;
+  if (alive()) { try { chrome.storage.local.remove('armedState'); } catch (e) {} }
   log('DISARMED', 'warn'); setStatus('disarmed');
 }
 
@@ -433,3 +457,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 log('loaded on ' + location.host);
 setTimeout(selfTest, 1500); // give the page a moment, then report what it sees
 setStatus('idle');
+
+// ---------- RESUME AFTER RELOAD ----------
+// If the page reloaded (or you reloaded it) while armed, the in-memory STATE
+// above was wiped. Check storage for a saved armedState and, if present,
+// automatically re-arm so the chase keeps going without manual intervention.
+// If an order was already placed before the reload, force chase-only so we
+// don't place a second order.
+if (alive()) {
+  try {
+    chrome.storage.local.get({ armedState: null }, (d) => {
+      const a = d.armedState;
+      if (!a) return;
+      // Give the SPA a moment to finish rendering the order book / form
+      // before we start reading prices and clicking things.
+      setTimeout(() => {
+        arm({
+          symbol: a.symbol, quantity: a.quantity, maxPrice: a.maxPrice,
+          chaseOnly: a.chaseOnly || a.hasPlacedOrder,
+        }, true);
+      }, 1200);
+    });
+  } catch (e) {}
+}
