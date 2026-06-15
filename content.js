@@ -36,12 +36,40 @@ const attrText = (el) => {
 const visible = (el) => el && el.offsetParent !== null;
 
 function setNativeValue(el, value) {
+  // Step 1: focus so Angular marks the field as touched
+  try { el.focus(); } catch (e) {}
+
+  // Step 2: use the native setter to bypass Angular's value accessor
   const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   const d = Object.getOwnPropertyDescriptor(proto, 'value');
   if (d && d.set) d.set.call(el, value); else el.value = value;
-  el.dispatchEvent(new Event('input', { bubbles: true }));
+
+  // Step 3: fire the full Angular event sequence.
+  // Angular listens to 'input' to update ngModel/formControl, then 'change'
+  // and 'blur' to mark dirty/touched. KeyboardEvent with key='Enter' is also
+  // needed for some Angular Material inputs that validate on keyup.
+  el.dispatchEvent(new Event('input',  { bubbles: true }));
   el.dispatchEvent(new Event('change', { bubbles: true }));
-  el.dispatchEvent(new Event('blur', { bubbles: true }));
+  el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: value, keyCode: 13 }));
+  el.dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true, key: value, keyCode: 13 }));
+  el.dispatchEvent(new Event('blur',   { bubbles: true }));
+
+  // Step 4: for Angular reactive forms, also try direct ngModel / __ngContext__
+  // patching so the control's internal value matches what we set on the DOM.
+  try {
+    // Angular Ivy stores component context on __ngContext__
+    const ctx = el.__ngContext__;
+    if (ctx) {
+      // Walk the context array looking for a control with .setValue()
+      const arr = Array.isArray(ctx) ? ctx : Object.values(ctx);
+      for (const item of arr) {
+        if (item && typeof item.setValue === 'function') {
+          item.setValue(value, { emitEvent: true, emitModelToViewChange: true });
+          break;
+        }
+      }
+    }
+  } catch (e) {}
 }
 
 // ---------- PRICE: find a stat value by its exact label (e.g. "HIGH") ----------
@@ -68,6 +96,12 @@ function valueForLabel(label) {
 function readTargetPrice() { return valueForLabel('HIGH'); }
 
 // ---------- ORDER BOOK: find table(s) by headers, read rows by column ----------
+// Angular TMS renders the order book as a <table> with <th> headers but the
+// actual <tr>/<td> data rows are injected inside custom Angular component tags
+// (e.g. <cdk-row>, <ng-container>) that sit as siblings to the <table> or
+// inside a wrapper <div>. So we look for headers in <th> elements anywhere on
+// the page, then walk UP to a common container and scan ALL <tr>/<td> rows in
+// that container — not just inside the <table> tag itself.
 function findOrderTables() {
   return [...document.querySelectorAll('table')].filter((t) => {
     const h = [...t.querySelectorAll('th')].map((x) => textOf(x).toUpperCase());
@@ -86,17 +120,64 @@ function headerMap(table) {
   });
   return m;
 }
-// FIX: Angular SPA tables often render <tr> directly under <table> with no <tbody>.
-// querySelectorAll('tbody tr') returns 0 rows in that case, so we fall back to
-// all <tr> elements that contain <td> cells (header rows only have <th>).
-const bodyRows = (table) => {
-  let rows = [...table.querySelectorAll('tbody tr')];
-  if (!rows.length) {
-    rows = [...table.querySelectorAll('tr')].filter((r) => r.querySelectorAll('td').length > 0);
+// Returns data rows from the order book table. Handles:
+// 1) Standard HTML tables with <tbody><tr><td>
+// 2) Angular Material/CDK tables where <td mat-cell> elements share a parent
+//    element (tr/div/custom) with no standard tbody structure.
+// Strategy: find all <td> cells in/around the table, group by their immediate
+// parent — each unique parent with 2+ cells is one data row.
+function tableContainer(table) {
+  // Walk up to find a container that holds the actual cell elements
+  let el = table;
+  for (let i = 0; i < 8; i++) {
+    if (el.querySelectorAll('td').length > 0) return el;
+    if (el.querySelectorAll('[role="cell"],[role="gridcell"]').length > 0) return el;
+    if (!el.parentElement) break;
+    el = el.parentElement;
   }
-  return rows.filter((r) => r.querySelectorAll('td').length > 1);
+  return table.parentElement || table;
+}
+const bodyRows = (table) => {
+  const container = tableContainer(table);
+
+  // 1) Standard: <tbody tr> with <td> children
+  let rows = [...container.querySelectorAll('tbody tr')].filter(r => r.querySelectorAll('td').length > 1);
+  if (rows.length) return rows;
+
+  // 2) Any <tr> with <td> children (no tbody)
+  rows = [...container.querySelectorAll('tr')].filter(r => r.querySelectorAll('td').length > 1);
+  if (rows.length) return rows;
+
+  // 3) Angular Material mat-table: <td mat-cell> elements share a <tr mat-row> parent.
+  //    Group all <td> cells by their immediate parent element — each parent = one row.
+  const allCells = [...container.querySelectorAll('td')];
+  if (allCells.length) {
+    const parentMap = new Map();
+    allCells.forEach(td => {
+      const p = td.parentElement;
+      if (!p) return;
+      if (!parentMap.has(p)) parentMap.set(p, []);
+      parentMap.get(p).push(td);
+    });
+    rows = [...parentMap.entries()]
+      .filter(([, cells]) => cells.length > 1)
+      .map(([parent]) => parent);
+    if (rows.length) return rows;
+  }
+
+  // 4) Angular CDK role="row" elements
+  rows = [...container.querySelectorAll('[role="row"]')]
+    .filter(r => r.querySelectorAll('[role="cell"],[role="gridcell"],td').length > 0);
+  if (rows.length) return rows;
+
+  return [];
 };
-const cellText = (row, idx) => { const td = row.querySelectorAll('td')[idx]; return td ? textOf(td) : ''; };
+const cellText = (row, idx) => {
+  // Support standard <td>, Angular CDK role="cell"/"gridcell", cdk-cell, mat-cell
+  const cells = [...row.querySelectorAll('td,[role="cell"],[role="gridcell"],cdk-cell,mat-cell')];
+  const td = cells[idx];
+  return td ? textOf(td) : '';
+};
 function rowOpen(row, m) {
   const s = (cellText(row, m.status) || '').toLowerCase();
   return !(s.includes('complet') || s.includes('fill') || s.includes('cancel') || s.includes('reject'));
@@ -128,10 +209,12 @@ function diagnoseOrderBook() {
   return tables.map((t, i) => {
     const h = [...t.querySelectorAll('th')].map(textOf);
     const rows = bodyRows(t);
+    const container = tableContainer(t);
     const tbodyOnly = [...t.querySelectorAll('tbody tr')].filter((r) => r.querySelectorAll('td').length > 1).length;
+    const containerTag = container.tagName + (container.id ? '#' + container.id : '');
     let row0 = '';
-    if (rows.length) row0 = ' row0=[' + [...rows[0].querySelectorAll('td')].map(textOf).join('|') + ']';
-    return `#${i} h=[${h.join(',')}] rows=${rows.length}(tbody=${tbodyOnly})${row0}`;
+    if (rows.length) row0 = ' row0=[' + [...rows[0].querySelectorAll('td,[role="cell"],[role="gridcell"]')].map(textOf).join('|') + ']';
+    return `#${i} h=[${h}] rows=${rows.length}(tbody=${tbodyOnly}) container=${containerTag}${row0}`;
   }).join(' || ');
 }
 function readOrder(o) {
@@ -157,17 +240,18 @@ function findEditControl(cell) {
 // True once the page shows the "Modifying Order # N" badge (i.e. the BUY
 // button is now acting as Save-modify, not Place-new-order).
 function inModifyMode() {
-  // Most reliable: the page's own modify-strip element, shown via a "show" class.
+  // 1) Real TMS: the URL changes to include mode=Modify when editing an order.
+  if (/mode=Modify/i.test(location.href)) return true;
+  // 2) Test page (a.html): mod-strip element shown via "show" class.
   const strip = document.getElementById('mod-strip');
   if (strip && strip.classList && strip.classList.contains('show')) return true;
-  // Fallback: scan visible text content (not just leaf elements, since the
-  // badge text may be split across child spans) for "Modifying Order".
-  return [...document.querySelectorAll('div,span,p,b,strong,button')]
+  // 3) Generic fallback: any visible element whose text contains "Modifying Order".
+  return [...document.querySelectorAll('div,span,p,b,strong,button,a')]
     .some((el) => visible(el) && /modifying order/i.test(el.textContent || ''));
 }
 
 async function modifyOrderRow(o, newPrice) {
-  const cell = o.row.querySelectorAll('td')[o.m.action];
+  const cell = [...o.row.querySelectorAll('td,[role="cell"],[role="gridcell"],cdk-cell,mat-cell')][o.m.action];
   if (!cell) throw new Error('action cell not found');
   const edit = findEditControl(cell);
   if (!edit) throw new Error('Modify icon not found in action cell');
@@ -184,9 +268,18 @@ async function modifyOrderRow(o, newPrice) {
   if (!inModifyMode()) throw new Error('did not enter Modifying-Order mode — edit icon may be wrong');
   if (!pr) throw new Error('price box not found after clicking Edit');
 
-  setNativeValue(pr, String(newPrice));
-  await sleep(150);
-  if (!num(pr.value) || num(pr.value) <= 0) throw new Error('modify price did not stick: ' + pr.value);
+  // Try setting the price up to 3 times — Angular reactive forms sometimes
+  // need a moment to attach their value accessor before setNativeValue works.
+  let stuck = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    setNativeValue(pr, String(newPrice));
+    await sleep(200);
+    if (num(pr.value) && num(pr.value) > 0) { stuck = true; break; }
+    // Field still shows 0 — click into it first, then retry
+    try { pr.click(); pr.focus(); } catch (e) {}
+    await sleep(150);
+  }
+  if (!stuck) throw new Error('modify price did not stick: ' + pr.value);
 
   // Re-check we're still in modify mode right before submitting (guards against
   // the form resetting back to "new order" between the checks above and now).
