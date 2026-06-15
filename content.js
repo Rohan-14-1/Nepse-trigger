@@ -7,7 +7,7 @@ const STATE = {
   armed: false, symbol: null, quantity: 0, capPrice: 0, chaseOnly: false,
   placed: false, orderPrice: 0, lastModify: 0, busy: false, timer: null,
 };
-const POLL_MS = 300, MODIFY_COOLDOWN_MS = 800, PRICE_STEP = 0.01;
+const POLL_MS = 300, MODIFY_COOLDOWN_MS = 800, PRICE_STEP = 0.01, POST_MODIFY_SETTLE_MS = 6000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // If an older copy of this script is still ticking in this page, stop it.
@@ -477,7 +477,13 @@ async function tick() {
     }
     STATE.diagnosed = false; // reset so a future loss of the row logs diagnostics again
     const { price, status } = readOrder(o);
-    if (STATE.orderPrice === 0 && price != null) { STATE.orderPrice = price; log(`tracking order @ ${price}`, 'go'); }
+    // Only update orderPrice from the book when not in post-modify settle period,
+    // to avoid using stale prices that haven't refreshed yet after a modify.
+    const settled = (Date.now() - STATE.lastModify) > MODIFY_COOLDOWN_MS;
+    if (price != null && (STATE.orderPrice === 0 || settled)) {
+      if (STATE.orderPrice === 0) log(`tracking order @ ${price}`, 'go');
+      STATE.orderPrice = price;
+    }
     if (status.includes('complet') || status.includes('fill')) {
       log(`ORDER COMPLETED @ ${STATE.orderPrice}`, 'go'); setStatus('completed'); disarm(); return;
     }
@@ -496,8 +502,13 @@ async function tick() {
       setStatus(`price rose → modifying ${base} → ${target}`);
       try {
         await modifyOrderRow(o, target);
-        STATE.orderPrice = target; STATE.lastModify = Date.now();
-        log(`MODIFIED → ${target}`, 'go'); setStatus(`modified @ ${target} — chasing`);
+        STATE.orderPrice = target;
+        // Use a longer settle time after modify — the TMS page reloads after
+        // each modify and the order book briefly shows rows=0 with stale prices.
+        // Without this, the next tick fires immediately, reads stale data, and
+        // triggers a duplicate modify at price=0 (causing the red TMS error).
+        STATE.lastModify = Date.now() + POST_MODIFY_SETTLE_MS - MODIFY_COOLDOWN_MS;
+        log(`MODIFIED → ${target}`, 'go'); setStatus(`modified @ ${target} — settling`);
       } catch (e) { log(`modify failed: ${e.message}`, 'error'); setStatus(`error — ${e.message}`); }
     }
   } finally { STATE.busy = false; }
