@@ -183,17 +183,19 @@ function rowOpen(row, m) {
   return !(s.includes('complet') || s.includes('fill') || s.includes('cancel') || s.includes('reject'));
 }
 function findOrderRow(symbol) {
+  // Always target the FIRST (topmost) open order matching the symbol.
+  // If multiple open orders exist for the same symbol, only row #1 is chased.
+  // This prevents duplicate modifies when old test orders are still in the book.
   for (const table of findOrderTables()) {
     const m = headerMap(table);
     const rows = bodyRows(table);
-    if (!rows.length) continue; // try the next matching table
-    let firstOpen = null;
+    if (!rows.length) continue;
     for (const row of rows) {
       if (!rowOpen(row, m)) continue;
-      if (!symbol) { if (!firstOpen) firstOpen = { row, m }; continue; }
-      if ((cellText(row, m.symbol) || '').toUpperCase().includes(symbol)) return { row, m };
+      const rowSym = (cellText(row, m.symbol) || '').toUpperCase();
+      if (symbol && !rowSym.includes(symbol)) continue;
+      return { row, m }; // return the very first matching open row and stop
     }
-    if (!symbol && firstOpen) return firstOpen;
   }
   return null;
 }
@@ -508,6 +510,10 @@ async function tick() {
         // Without this, the next tick fires immediately, reads stale data, and
         // triggers a duplicate modify at price=0 (causing the red TMS error).
         STATE.lastModify = Date.now() + POST_MODIFY_SETTLE_MS - MODIFY_COOLDOWN_MS;
+        // Persist lastModify so that if the page reloads (which it does after
+        // every modify on the real TMS), the auto-resume won't immediately fire
+        // another modify before the settle period has elapsed.
+        if (alive()) { try { chrome.storage.local.get({ armedState: null }, (d) => { if (d.armedState) chrome.storage.local.set({ armedState: { ...d.armedState, lastModify: STATE.lastModify } }); }); } catch(e) {} }
         log(`MODIFIED → ${target}`, 'go'); setStatus(`modified @ ${target} — settling`);
       } catch (e) { log(`modify failed: ${e.message}`, 'error'); setStatus(`error — ${e.message}`); }
     }
@@ -520,7 +526,7 @@ function arm(p, resumed) {
   STATE.capPrice = p.maxPrice || 0;
   STATE.chaseOnly = !!p.chaseOnly;
   STATE.placed = STATE.chaseOnly;
-  STATE.orderPrice = 0; STATE.lastModify = 0; STATE.busy = false; STATE.placeFails = 0; STATE.diagnosed = false; STATE.armed = true;
+  STATE.orderPrice = 0; STATE.lastModify = p._lastModify || 0; STATE.busy = false; STATE.placeFails = 0; STATE.diagnosed = false; STATE.armed = true;
   const mode = STATE.chaseOnly ? 'CHASE-ONLY' : 'PLACE+CHASE';
   const capTxt = STATE.capPrice > 0 ? `cap ${STATE.capPrice}` : 'no cap';
   log(`${resumed ? 'RE-ARMED after reload' : 'ARMED'} [${mode}] ${STATE.symbol || '(any)'} ${STATE.chaseOnly ? '' : 'x' + STATE.quantity + ', '}${capTxt}`, 'go');
@@ -579,6 +585,8 @@ if (alive()) {
         arm({
           symbol: a.symbol, quantity: a.quantity, maxPrice: a.maxPrice,
           chaseOnly: a.chaseOnly || a.hasPlacedOrder,
+          // Restore the lastModify timestamp so the settle cooldown survives reload
+          _lastModify: a.lastModify || 0,
         }, true);
       }, 1200);
     });
