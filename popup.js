@@ -98,6 +98,28 @@ $('armBtn').addEventListener('click', () => (armedMode === 'place' ? stop() : st
 $('modifyBtn').addEventListener('click', () => (armedMode === 'modify' ? stop() : start('modify')));
 $('clearBtn').addEventListener('click', () => chrome.storage.local.set({ log: [] }));
 
+// ── Persist symbol, quantity, maxPrice across popup opens and page reloads ──
+// Save whenever the user changes a field
+['symbol', 'quantity', 'maxPrice'].forEach((id) => {
+  $(id).addEventListener('input', () => {
+    chrome.storage.local.set({
+      savedInputs: {
+        symbol:   $('symbol').value,
+        quantity: $('quantity').value,
+        maxPrice: $('maxPrice').value,
+      }
+    });
+  });
+});
+
+// Restore saved values when popup opens
+chrome.storage.local.get({ savedInputs: null }, (d) => {
+  if (!d.savedInputs) return;
+  if (d.savedInputs.symbol)   $('symbol').value   = d.savedInputs.symbol;
+  if (d.savedInputs.quantity) $('quantity').value = d.savedInputs.quantity;
+  if (d.savedInputs.maxPrice) $('maxPrice').value = d.savedInputs.maxPrice;
+});
+
 setInterval(poll, 500);
 poll();
 
