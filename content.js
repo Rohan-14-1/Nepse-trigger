@@ -7,7 +7,7 @@ const STATE = {
   armed: false, symbol: null, quantity: 0, capPrice: 0, chaseOnly: false,
   placed: false, orderPrice: 0, lastModify: 0, busy: false, timer: null,
 };
-const POLL_MS = 300, MODIFY_COOLDOWN_MS = 800, PRICE_STEP = 0.01, POST_MODIFY_SETTLE_MS = 6000;
+const POLL_MS = 300, MODIFY_COOLDOWN_MS = 400, PRICE_STEP = 0.01, POST_MODIFY_SETTLE_MS = 3500;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // If an older copy of this script is still ticking in this page, stop it.
