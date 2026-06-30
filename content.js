@@ -5,9 +5,9 @@
 
 const STATE = {
   armed: false, symbol: null, quantity: 0, capPrice: 0, chaseOnly: false,
-  placed: false, orderPrice: 0, lastModify: 0, busy: false, timer: null,
+  placed: false, orderPrice: 0, lastModify: 0, lastModifiedPrice: 0, busy: false, timer: null,
 };
-const POLL_MS = 300, MODIFY_COOLDOWN_MS = 400, PRICE_STEP = 0.01, POST_MODIFY_SETTLE_MS = 3500;
+const POLL_MS = 300, MODIFY_COOLDOWN_MS = 400, PRICE_STEP = 0.01, POST_MODIFY_SETTLE_MS = 2500;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // If an older copy of this script is still ticking in this page, stop it.
@@ -293,6 +293,27 @@ async function modifyOrderRow(o, newPrice) {
   const submit = findSubmitButton('update|modif|save|confirm') || findBuyButton();
   if (!submit) throw new Error('update/save button not found');
   clickEl(submit);
+  await sleep(500);
+  // Auto-click the order book refresh button (↺) so we don't need manual refresh
+  autoRefreshOrderBook();
+}
+
+function autoRefreshOrderBook() {
+  // TMS35 order book has a refresh icon button — find and click it
+  const btns = [...document.querySelectorAll('button,a,i,span')].filter(visible);
+  const refresh = btns.find(b => {
+    const cls = (b.className || '').toLowerCase();
+    const title = (b.getAttribute('title') || '').toLowerCase();
+    return cls.includes('refresh') || cls.includes('reload') ||
+           title.includes('refresh') || title.includes('reload') ||
+           b.innerHTML.includes('↺') || b.innerHTML.includes('fa-refresh') ||
+           b.innerHTML.includes('fa-sync') || b.innerHTML.includes('refresh');
+  });
+  if (refresh) { clickEl(refresh); return; }
+  // Fallback: look for the ↺ character directly
+  const all = [...document.querySelectorAll('*')].filter(visible);
+  const icon = all.find(el => el.children.length === 0 && /^↺$/.test(textOf(el).trim()));
+  if (icon) clickEl(icon);
 }
 
 // Re-load a symbol into the form so the HIGH price is readable (placing/modifying
@@ -407,10 +428,15 @@ async function placeOrder(symbol, quantity, capPrice) {
   if (!(await ensureBuySide())) throw new Error('no BUY button — flip the toggle to BUY');
   // 4) Fill quantity and price AFTER switching side, so nothing resets them.
   const qty = inputForLabel('QTY'); if (qty) setNativeValue(qty, String(quantity));
-  const pr = inputForLabel('PRICE'); if (pr) setNativeValue(pr, String(price));
-  await sleep(120);
-  // 5) Verify they actually stuck — never fire a zero-price order.
-  const gotPrice = pr ? num(pr.value) : null;
+  const pr = inputForLabel('PRICE');
+  // 5) Retry price up to 3 times — Angular form sometimes needs a moment.
+  let gotPrice = null;
+  for (let i = 0; i < 3; i++) {
+    if (pr) setNativeValue(pr, String(price));
+    await sleep(150);
+    gotPrice = pr ? num(pr.value) : null;
+    if (gotPrice && gotPrice > 0) break;
+  }
   const gotQty = qty ? num(qty.value) : null;
   if (!gotPrice || gotPrice <= 0) throw new Error('price box stayed ' + (pr ? pr.value : 'missing'));
   if (!gotQty || gotQty <= 0) throw new Error('quantity box not set');
@@ -501,20 +527,26 @@ async function tick() {
     setStatus(`chasing ${orderSym} @ ${base} (HIGH ${p})`);
     if (target > base + PRICE_STEP) {
       if (Date.now() - STATE.lastModify < MODIFY_COOLDOWN_MS) return;
+      // Skip if already modified to this exact price
+      if (Math.abs(target - STATE.lastModifiedPrice) < PRICE_STEP) return;
       setStatus(`price rose → modifying ${base} → ${target}`);
       try {
         await modifyOrderRow(o, target);
         STATE.orderPrice = target;
-        // Use a longer settle time after modify — the TMS page reloads after
-        // each modify and the order book briefly shows rows=0 with stale prices.
-        // Without this, the next tick fires immediately, reads stale data, and
-        // triggers a duplicate modify at price=0 (causing the red TMS error).
+        STATE.lastModifiedPrice = target;
         STATE.lastModify = Date.now() + POST_MODIFY_SETTLE_MS - MODIFY_COOLDOWN_MS;
-        // Persist lastModify so that if the page reloads (which it does after
-        // every modify on the real TMS), the auto-resume won't immediately fire
-        // another modify before the settle period has elapsed.
-        if (alive()) { try { chrome.storage.local.get({ armedState: null }, (d) => { if (d.armedState) chrome.storage.local.set({ armedState: { ...d.armedState, lastModify: STATE.lastModify } }); }); } catch(e) {} }
-        log(`MODIFIED → ${target}`, 'go'); setStatus(`modified @ ${target} — settling`);
+        if (alive()) { try { chrome.storage.local.get({ armedState: null }, (d) => { if (d.armedState) chrome.storage.local.set({ armedState: { ...d.armedState, lastModify: STATE.lastModify, lastModifiedPrice: STATE.lastModifiedPrice } }); }); } catch(e) {} }
+        log(`MODIFIED → ${target}`, 'go'); setStatus(`modified @ ${target} — waiting for book`);
+        // Poll every 200ms until order book comes back — faster than fixed wait
+        const settleStart = Date.now();
+        while (Date.now() - settleStart < POST_MODIFY_SETTLE_MS) {
+          await sleep(200);
+          const t = findOrderTable();
+          if (t && bodyRows(t).length > 0) { await sleep(300); break; }
+        }
+        STATE.lastModify = 0;
+        if (alive()) { try { chrome.storage.local.get({ armedState: null }, (d) => { if (d.armedState) chrome.storage.local.set({ armedState: { ...d.armedState, lastModify: 0, lastModifiedPrice: STATE.lastModifiedPrice } }); }); } catch(e) {} }
+        setStatus(`modified @ ${target} — chasing`);
       } catch (e) { log(`modify failed: ${e.message}`, 'error'); setStatus(`error — ${e.message}`); }
     }
   } finally { STATE.busy = false; }
@@ -526,7 +558,7 @@ function arm(p, resumed) {
   STATE.capPrice = p.maxPrice || 0;
   STATE.chaseOnly = !!p.chaseOnly;
   STATE.placed = STATE.chaseOnly;
-  STATE.orderPrice = 0; STATE.lastModify = p._lastModify || 0; STATE.busy = false; STATE.placeFails = 0; STATE.diagnosed = false; STATE.armed = true;
+  STATE.orderPrice = 0; STATE.lastModify = p._lastModify || 0; STATE.lastModifiedPrice = p._lastModifiedPrice || 0; STATE.busy = false; STATE.placeFails = 0; STATE.diagnosed = false; STATE.armed = true;
   const mode = STATE.chaseOnly ? 'CHASE-ONLY' : 'PLACE+CHASE';
   const capTxt = STATE.capPrice > 0 ? `cap ${STATE.capPrice}` : 'no cap';
   log(`${resumed ? 'RE-ARMED after reload' : 'ARMED'} [${mode}] ${STATE.symbol || '(any)'} ${STATE.chaseOnly ? '' : 'x' + STATE.quantity + ', '}${capTxt}`, 'go');
@@ -587,6 +619,7 @@ if (alive()) {
           chaseOnly: a.chaseOnly || a.hasPlacedOrder,
           // Restore the lastModify timestamp so the settle cooldown survives reload
           _lastModify: a.lastModify || 0,
+          _lastModifiedPrice: a.lastModifiedPrice || 0,
         }, true);
       }, 1200);
     });
